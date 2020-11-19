@@ -155,8 +155,12 @@ module GC
     __builtin_gc_latest_gc_info hash_or_key
   end
 
-  def self.compact
-    __builtin_rb_gc_compact
+  def self.compact(dedup: false)
+    if dedup
+      __builtin_rb_gc_dedup_compact
+    else
+      __builtin_rb_gc_compact
+    end
   end
 end
 

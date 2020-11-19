@@ -698,6 +698,7 @@ typedef struct rb_objspace {
 #if GC_ENABLE_INCREMENTAL_MARK
 	unsigned int during_incremental_marking : 1;
 #endif
+    unsigned int dedup_compact : 1;
     } flags;
 
     rb_event_flag_t hook_events;
@@ -7580,6 +7581,8 @@ gc_is_moveable_obj(rb_objspace_t *objspace, VALUE obj)
     return FALSE;
 }
 
+#define BARE_STRING_P(str) (!FL_ANY_RAW(str, FL_EXIVAR) && RBASIC_CLASS(str) == rb_cString)
+
 static VALUE
 gc_move(rb_objspace_t *objspace, VALUE scan, VALUE free, VALUE moved_list)
 {
@@ -7787,6 +7790,67 @@ allocate_page_list(rb_objspace_t *objspace, page_compare_func_t *comparator)
     ruby_qsort(page_list, total_pages, sizeof(struct heap_page *), comparator, NULL);
 
     return page_list;
+}
+
+static bool gc_dedup_string(rb_objspace_t *objspace, VALUE slot, VALUE *moved_list) {
+    if (BUILTIN_TYPE(slot) != T_STRING)
+        return false;
+
+    objspace->rcompactor.considered_count_table[BUILTIN_TYPE(slot)]++;
+
+    if (!BARE_STRING_P(slot))
+        return false;
+    if (!rb_obj_frozen_p(slot))
+        return false;
+    if (FL_TEST(slot, RSTRING_FSTR))
+        return false;
+    if (!gc_is_moveable_obj(objspace, slot))
+        return false;
+
+    RVALUE *src = (RVALUE *)slot;
+    VALUE dest = rb_fstring(slot);
+
+    gc_report(4, objspace, "Moved: %p => %p: %s\n",
+        (void*)src, (void*)dest, rb_str_to_cstr(slot));
+
+    objspace->rcompactor.moved_count_table[BUILTIN_TYPE(slot)]++;
+
+    CLEAR_IN_BITMAP(GET_HEAP_MARK_BITS((VALUE)src), (VALUE)src);
+    CLEAR_IN_BITMAP(GET_HEAP_WB_UNPROTECTED_BITS((VALUE)src), (VALUE)src);
+    CLEAR_IN_BITMAP(GET_HEAP_UNCOLLECTIBLE_BITS((VALUE)src), (VALUE)src);
+    CLEAR_IN_BITMAP(GET_HEAP_MARKING_BITS((VALUE)src), (VALUE)src);
+    memset(src, 0, sizeof(RVALUE));
+
+    src->as.moved.flags = T_MOVED;
+    src->as.moved.destination = dest;
+    src->as.moved.next = *moved_list;
+    *moved_list = slot;
+    return true;
+}
+
+static VALUE
+gc_dedup_strings(rb_objspace_t *objspace, page_compare_func_t *comparator)
+{
+    struct heap_cursor free_cursor;
+    struct heap_cursor scan_cursor;
+    struct heap_page **page_list;
+    VALUE moved_list;
+
+    moved_list = Qfalse;
+    memset(objspace->rcompactor.considered_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
+
+    page_list = allocate_page_list(objspace, comparator);
+
+    init_cursors(objspace, &free_cursor, &scan_cursor, page_list);
+
+    while (not_met(&free_cursor, &scan_cursor)) {
+        gc_dedup_string(objspace, (VALUE)scan_cursor.slot, &moved_list);
+        retreat_cursor(&scan_cursor, page_list);
+    }
+    free(page_list);
+
+    return moved_list;
 }
 
 static VALUE
@@ -8476,6 +8540,16 @@ rb_gc_compact(rb_execution_context_t *ec, VALUE self)
     return gc_compact_stats(objspace);
 }
 
+static VALUE
+rb_gc_dedup_compact(rb_execution_context_t *ec, VALUE self)
+{
+    rb_objspace_t *objspace = &rb_objspace;
+    objspace->flags.dedup_compact = TRUE;
+    VALUE ret = rb_gc_compact(ec, self);
+    objspace->flags.dedup_compact = FALSE;
+    return ret;
+}
+
 static void
 root_obj_check_moved_i(const char *category, VALUE obj, void *data)
 {
@@ -8549,10 +8623,12 @@ gc_compact_after_gc(rb_objspace_t *objspace, int use_toward_empty, int use_doubl
         heap_add_pages(objspace, heap_eden, heap_allocated_pages);
     }
 
-    VALUE moved_list_head;
+    VALUE moved_list_head = Qfalse;
     VALUE disabled = rb_objspace_gc_disable(objspace);
 
-    if (use_toward_empty) {
+    if (objspace->flags.dedup_compact) {
+        moved_list_head = gc_dedup_strings(objspace, compare_pinned);
+    } else if (use_toward_empty) {
         moved_list_head = gc_compact_heap(objspace, compare_free_slots);
     }
     else {
