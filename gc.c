@@ -6380,6 +6380,8 @@ gc_marks_finish(rb_objspace_t *objspace)
 	/* check free_min */
 	if (min_free_slots < gc_params.heap_free_slots) min_free_slots = gc_params.heap_free_slots;
 
+    gc_report(0, objspace, "SLOTS: total=%d, sweep_slots=%d, min_free=%d, max_free=%d, freeable_pages=%d\n", total_slots, sweep_slots, min_free_slots, max_free_slots, heap_pages_freeable_pages);
+
 #if USE_RGENGC
 	if (sweep_slots < min_free_slots) {
 	    if (!full_marking) {
@@ -7798,17 +7800,26 @@ static bool gc_dedup_string(rb_objspace_t *objspace, VALUE slot, VALUE *moved_li
 
     objspace->rcompactor.considered_count_table[BUILTIN_TYPE(slot)]++;
 
-    if (!BARE_STRING_P(slot))
+    if (!BARE_STRING_P(slot)) {
+        objspace->rcompactor.moved_count_table[T_NONE]++;
         return false;
-    if (!rb_obj_frozen_p(slot))
+    }
+    if (!rb_obj_frozen_p(slot)) {
+        objspace->rcompactor.moved_count_table[T_OBJECT]++;
         return false;
-    if (FL_TEST(slot, RSTRING_FSTR))
+    }
+    if (!gc_is_moveable_obj(objspace, slot)) {
+        objspace->rcompactor.moved_count_table[T_MODULE]++;
         return false;
-    if (!gc_is_moveable_obj(objspace, slot))
-        return false;
+    }
 
     RVALUE *src = (RVALUE *)slot;
     VALUE dest = rb_fstring(slot);
+
+    if (src == dest) {
+        objspace->rcompactor.moved_count_table[T_CLASS]++;
+        return false;
+    }
 
     gc_report(4, objspace, "Moved: %p => %p: %s\n",
         (void*)src, (void*)dest, rb_str_to_cstr(slot));
@@ -8918,11 +8929,13 @@ enum gc_stat_sym {
     gc_stat_sym_heap_allocated_pages,
     gc_stat_sym_heap_sorted_length,
     gc_stat_sym_heap_allocatable_pages,
+    gc_stat_sym_heap_freeable_pages,
     gc_stat_sym_heap_available_slots,
     gc_stat_sym_heap_live_slots,
     gc_stat_sym_heap_free_slots,
     gc_stat_sym_heap_final_slots,
     gc_stat_sym_heap_marked_slots,
+    gc_stat_sym_heap_pinned_slots,
     gc_stat_sym_heap_eden_pages,
     gc_stat_sym_heap_tomb_pages,
     gc_stat_sym_total_allocated_pages,
@@ -8995,11 +9008,13 @@ setup_gc_stat_symbols(void)
 	S(heap_allocated_pages);
 	S(heap_sorted_length);
 	S(heap_allocatable_pages);
+    S(heap_freeable_pages);
 	S(heap_available_slots);
 	S(heap_live_slots);
 	S(heap_free_slots);
 	S(heap_final_slots);
 	S(heap_marked_slots);
+	S(heap_pinned_slots);
 	S(heap_eden_pages);
 	S(heap_tomb_pages);
 	S(total_allocated_pages);
@@ -9169,6 +9184,7 @@ gc_stat_internal(VALUE hash_or_sym)
     SET(heap_sorted_length, heap_pages_sorted_length);
     SET(heap_allocatable_pages, heap_allocatable_pages);
     SET(heap_available_slots, objspace_available_slots(objspace));
+    SET(heap_freeable_pages, heap_pages_freeable_pages);
     SET(heap_live_slots, objspace_live_slots(objspace));
     SET(heap_free_slots, objspace_free_slots(objspace));
     SET(heap_final_slots, heap_pages_final_slots);
@@ -9226,6 +9242,51 @@ gc_stat_internal(VALUE hash_or_sym)
 #endif
 
     return 0;
+}
+
+static VALUE
+gc_pages_stat(rb_execution_context_t *ec, VALUE self)
+{
+    rb_objspace_t *objspace = &rb_objspace;
+	struct heap_page *page = NULL;
+    VALUE ret = rb_hash_new();
+    int i;
+
+    setup_gc_stat_symbols();
+
+    VALUE eden_pages = rb_ary_new();
+    VALUE tomb_pages = rb_ary_new();
+
+    VALUE free_slots = ID2SYM(rb_intern_const("free"));
+    VALUE live_slots = ID2SYM(rb_intern_const("live"));
+    VALUE total_slots = ID2SYM(rb_intern_const("total"));
+    VALUE final_slots = ID2SYM(rb_intern_const("final"));
+    VALUE pinned_slots = ID2SYM(rb_intern_const("pinned"));
+
+	list_for_each(&heap_eden->pages, page, page_node) {
+        VALUE page_hash = rb_hash_new();
+        rb_hash_aset(page_hash, free_slots, SIZET2NUM(page->free_slots));
+        rb_hash_aset(page_hash, live_slots, SIZET2NUM(page->total_slots-page->free_slots));
+        rb_hash_aset(page_hash, total_slots, SIZET2NUM(page->total_slots));
+        rb_hash_aset(page_hash, final_slots, SIZET2NUM(page->final_slots));
+        rb_hash_aset(page_hash, pinned_slots, SIZET2NUM(page->pinned_slots));
+        eden_pages = rb_ary_push(eden_pages, page_hash);
+	}
+
+	list_for_each(&heap_tomb->pages, page, page_node) {
+        VALUE page_hash = rb_hash_new();
+        rb_hash_aset(page_hash, free_slots, SIZET2NUM(page->free_slots));
+        rb_hash_aset(page_hash, live_slots, SIZET2NUM(page->total_slots-page->free_slots));
+        rb_hash_aset(page_hash, total_slots, SIZET2NUM(page->total_slots));
+        rb_hash_aset(page_hash, final_slots, SIZET2NUM(page->final_slots));
+        rb_hash_aset(page_hash, pinned_slots, SIZET2NUM(page->pinned_slots));
+        tomb_pages = rb_ary_push(tomb_pages, page_hash);
+	}
+
+    rb_hash_aset(ret, ID2SYM(rb_intern_const("eden_pages")), eden_pages);
+    rb_hash_aset(ret, ID2SYM(rb_intern_const("tomb_pages")), tomb_pages);
+
+    return ret;
 }
 
 static VALUE

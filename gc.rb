@@ -145,6 +145,10 @@ module GC
     __builtin_gc_stat hash_or_key
   end
 
+  def self.pages_stat
+    __builtin_gc_pages_stat
+  end
+
   #  call-seq:
   #     GC.latest_gc_info -> {:gc_by=>:newobj}
   #     GC.latest_gc_info(hash) -> hash
