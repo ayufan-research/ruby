@@ -2173,6 +2173,13 @@ newobj_init(VALUE klass, VALUE flags, VALUE v1, VALUE v2, VALUE v3, int wb_prote
     GC_ASSERT(!SPECIAL_CONST_P(obj)); /* check alignment */
 #endif
 
+#if THREAD_STAT
+    rb_thread_t *th = GET_EC() ? GET_THREAD() : NULL;
+    if (th) {
+	    ATOMIC_SIZE_INC(th->stat.total_allocated_objects);
+    }
+#endif
+
     objspace->total_allocated_objects++;
 
     gc_report(5, objspace, "newobj: %s\n", obj_info(obj));
@@ -9868,6 +9875,19 @@ objspace_malloc_increase(rb_objspace_t *objspace, void *mem, size_t new_size, si
 	atomic_sub_nounderflow(&objspace->rgengc.oldmalloc_increase, old_size - new_size);
 #endif
     }
+
+#if THREAD_STAT
+    rb_thread_t *th = GET_EC() ? GET_THREAD() : NULL;
+    if (th) {
+        if (new_size > old_size) {
+            ATOMIC_SIZE_ADD(th->stat.total_malloc_bytes, new_size - old_size);
+        }
+
+        if (type == MEMOP_TYPE_MALLOC) {
+	        ATOMIC_SIZE_INC(th->stat.total_mallocs);
+        }
+    }
+#endif
 
     if (type == MEMOP_TYPE_MALLOC) {
       retry:

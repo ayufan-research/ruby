@@ -69,6 +69,13 @@
 # define VM_INSN_INFO_TABLE_IMPL 2
 #endif
 
+/*
+ * track a per thread memory allocations
+ */
+#ifndef THREAD_STAT
+# define THREAD_STAT 1
+#endif
+
 #include "ruby/ruby.h"
 #include "ruby/st.h"
 
@@ -959,6 +966,14 @@ typedef struct rb_thread_struct {
     struct rb_mutex_struct *keeping_mutexes;
 
     rb_thread_list_t *join_list;
+
+#if THREAD_STAT
+    struct {
+        size_t total_allocated_objects;
+        size_t total_malloc_bytes;
+        size_t total_mallocs;
+    } stat;
+#endif
 
     union {
         struct {

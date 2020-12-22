@@ -5143,6 +5143,25 @@ rb_thread_backtrace_locations_m(int argc, VALUE *argv, VALUE thval)
     return rb_vm_thread_backtrace_locations(argc, argv, thval);
 }
 
+#if THREAD_STAT
+static VALUE
+rb_thread_stat(VALUE self)
+{
+    rb_thread_t *th = rb_thread_ptr(self);
+    VALUE ret = rb_hash_new();
+
+    VALUE total_allocated_objects = ID2SYM(rb_intern_const("total_allocated_objects"));
+    VALUE total_malloc_bytes = ID2SYM(rb_intern_const("total_malloc_bytes"));
+    VALUE total_mallocs = ID2SYM(rb_intern_const("total_mallocs"));
+
+    rb_hash_aset(ret, total_allocated_objects, SIZET2NUM(th->stat.total_allocated_objects));
+    rb_hash_aset(ret, total_malloc_bytes, SIZET2NUM(th->stat.total_malloc_bytes));
+    rb_hash_aset(ret, total_mallocs, SIZET2NUM(th->stat.total_mallocs));
+
+    return ret;
+}
+#endif
+
 /*
  *  Document-class: ThreadError
  *
@@ -5229,6 +5248,10 @@ Init_Thread(void)
     rb_define_method(rb_cThread, "name=", rb_thread_setname, 1);
     rb_define_method(rb_cThread, "to_s", rb_thread_to_s, 0);
     rb_define_alias(rb_cThread, "inspect", "to_s");
+
+    #if THREAD_STAT
+    rb_define_method(rb_cThread, "stat", rb_thread_stat, 0);
+    #endif
 
     rb_vm_register_special_exception(ruby_error_stream_closed, rb_eIOError,
 				     "stream closed in another thread");
