@@ -7374,11 +7374,7 @@ gc_marks_finish(rb_objspace_t *objspace)
 	GC_ASSERT(heap->total_slots >= objspace->marked_slots);
 
 	/* setup free-able page counts */
-        if (max_free_slots < gc_params.heap_init_slots * r_mul) {
-            max_free_slots = gc_params.heap_init_slots * r_mul;
-        }
-
-	if (sweep_slots > max_free_slots) {
+	if (gc_params.heap_init_slots < total_slots && sweep_slots > max_free_slots) {
 	    heap_pages_freeable_pages = (sweep_slots - max_free_slots) / HEAP_PAGE_OBJ_LIMIT;
 	}
 	else {
